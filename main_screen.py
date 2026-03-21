@@ -164,7 +164,17 @@ while running:
     # Distance/Depth Ray to Center
     pygame.draw.line(screen_ui, (*Endesga.white, 150), cam_px, px_centers[1], 3)
     mid_ray = cam_px + (px_centers[1] - cam_px) * 0.5
-    drawText(screen_ui, Endesga.white, fonts["bold26"], mid_ray.x - 30, mid_ray.y - 40, f"ZC = {dist_to_center:.1f} ft")
+
+    # Calculate True ZC Depth early to display correctly on the map instead of raw distance
+    center_3d = (drone_pos.x, drone_pos.y, tag_size / 2)
+    center_proj = project_3d_to_sensor(center_3d, cam_pos, cam_look_angle, focal_len)
+    if center_proj:
+        drawText(screen_ui, Endesga.white, fonts["bold26"], mid_ray.x - 30, mid_ray.y - 40,
+                 f"ZC = {center_proj[2]:.1f} ft")
+    else:
+        # Fallback to pure distance if camera is inside
+        drawText(screen_ui, Endesga.white, fonts["bold26"], mid_ray.x - 30, mid_ray.y - 40,
+                 f"Dist = {dist_to_center:.1f} ft")
 
     # --- ANGLE BASHING & CONSTRUCTION LINES (TOP-DOWN) ---
     wL, wR = tag_centers[0], tag_centers[2]
@@ -192,8 +202,11 @@ while running:
     angle_wing_world = math.atan2(wR.y - wL.y, wR.x - wL.x)
     draw_arc_lines(screen_ui, px_L, angle_lat_world, angle_wing_world, 70, Endesga.cream, 4)
 
-    B_val = abs((angle_wing_world - angle_lat_world + math.pi) % (2 * math.pi) - math.pi)
-    drawText(screen_ui, Endesga.cream, fonts["bold30"], px_L.x + 25, px_L.y - 60, f"B = {math.degrees(B_val):.1f}°")
+    # B_true accurately matches the mathematical B estimated by pose estimation below
+    B_true_rad = cam_look_angle - normal_angle
+    B_true_rad = (B_true_rad + math.pi) % (2 * math.pi) - math.pi
+    drawText(screen_ui, Endesga.cream, fonts["bold30"], px_L.x + 25, px_L.y - 60,
+             f"B = {math.degrees(B_true_rad):.1f}°")
 
     # Normal Line & Box Impact
     intersect_pt, wall_dir = get_ray_box_intersect(drone_pos.x, drone_pos.y, normal_angle, WORLD_SIZE)
@@ -275,47 +288,52 @@ while running:
 
     # DIMENSIONS OVERLAY
     if all(tag_centers_proj) and center_tag_2d_corners:
-        u_L, z_L = tag_centers_proj[0]
-        u_C, z_C = tag_centers_proj[1]
-        u_R, z_R = tag_centers_proj[2]
+
+        # Sort centers by X visually so D1 is ALWAYS the visual left delta and D2 is the right
+        u_sorted = sorted([p[0] for p in tag_centers_proj])
+        u_vis_L, u_vis_C, u_vis_R = u_sorted[0], u_sorted[1], u_sorted[2]
+
+        # Original depths
+        z_L, z_C, z_R = tag_centers_proj[0][1], tag_centers_proj[1][1], tag_centers_proj[2][1]
 
         # 3-Tag Deltas (Below trapezoids)
         dim_y = sensor_cy + 110
-        pygame.draw.line(screen_ui, Endesga.greyL, (u_L, dim_y), (u_C, dim_y), 4)
-        pygame.draw.line(screen_ui, Endesga.greyL, (u_C, dim_y), (u_R, dim_y), 4)
-        for u in [u_L, u_C, u_R]:
+        pygame.draw.line(screen_ui, Endesga.greyL, (u_vis_L, dim_y), (u_vis_C, dim_y), 4)
+        pygame.draw.line(screen_ui, Endesga.greyL, (u_vis_C, dim_y), (u_vis_R, dim_y), 4)
+        for u in [u_vis_L, u_vis_C, u_vis_R]:
             pygame.draw.line(screen_ui, Endesga.greyL, (u, dim_y - 15), (u, dim_y + 15), 4)
 
-        d1 = abs(u_C - u_L)
-        d2 = abs(u_R - u_C)
-        drawText(screen_ui, tag_cols[0], fonts["bold26"], (u_L + u_C) / 2, dim_y + 20, "Δ1", justify="center")
-        drawText(screen_ui, tag_cols[2], fonts["bold26"], (u_C + u_R) / 2, dim_y + 20, "Δ2", justify="center")
+        d1 = abs(u_vis_C - u_vis_L)
+        d2 = abs(u_vis_R - u_vis_C)
+        drawText(screen_ui, tag_cols[0], fonts["bold26"], (u_vis_L + u_vis_C) / 2, dim_y + 20, "Δ1", justify="center")
+        drawText(screen_ui, tag_cols[2], fonts["bold26"], (u_vis_C + u_vis_R) / 2, dim_y + 20, "Δ2", justify="center")
 
-        # 1-Tag Trapezoid Heights (With flipping logic to prevent overlap)
-        tl, tr, br, bl = center_tag_2d_corners
-        h_left = abs(tl[1] - bl[1])
-        h_right = abs(tr[1] - br[1])
+        # 1-Tag Trapezoid Heights (Sorted purely by Visual Left and Right)
+        sorted_corners_x = sorted(center_tag_2d_corners, key=lambda pt: pt[0])
+        left_pts = sorted_corners_x[:2]
+        right_pts = sorted_corners_x[2:]
 
-        # Check if the tag is physically flipped on screen
-        flip_mult = -1 if tl[0] > tr[0] else 1
+        vis_tl = min(left_pts, key=lambda pt: pt[1])
+        vis_bl = max(left_pts, key=lambda pt: pt[1])
+        vis_tr = min(right_pts, key=lambda pt: pt[1])
+        vis_br = max(right_pts, key=lambda pt: pt[1])
 
-        # Left physical edge
-        pygame.draw.line(screen_ui, Endesga.debug_red, (tl[0], tl[1]), (tl[0] - 30 * flip_mult, tl[1]), 3)
-        pygame.draw.line(screen_ui, Endesga.debug_red, (bl[0], bl[1]), (bl[0] - 30 * flip_mult, bl[1]), 3)
-        pygame.draw.line(screen_ui, Endesga.debug_red, (tl[0] - 20 * flip_mult, tl[1]), (tl[0] - 20 * flip_mult, bl[1]),
-                         3)
-        align_L = "right" if flip_mult == 1 else "left"
-        drawText(screen_ui, Endesga.debug_red, fonts["bold24"], tl[0] - 35 * flip_mult, (tl[1] + bl[1]) / 2 - 15, "hL",
-                 justify=align_L)
+        h_left_visual = abs(vis_tl[1] - vis_bl[1])
+        h_right_visual = abs(vis_tr[1] - vis_br[1])
 
-        # Right physical edge
-        pygame.draw.line(screen_ui, Endesga.debug_red, (tr[0], tr[1]), (tr[0] + 30 * flip_mult, tr[1]), 3)
-        pygame.draw.line(screen_ui, Endesga.debug_red, (br[0], br[1]), (br[0] + 30 * flip_mult, br[1]), 3)
-        pygame.draw.line(screen_ui, Endesga.debug_red, (tr[0] + 20 * flip_mult, tr[1]), (tr[0] + 20 * flip_mult, br[1]),
-                         3)
-        align_R = "left" if flip_mult == 1 else "right"
-        drawText(screen_ui, Endesga.debug_red, fonts["bold24"], tr[0] + 35 * flip_mult, (tr[1] + br[1]) / 2 - 15, "hR",
-                 justify=align_R)
+        # Left visual edge
+        pygame.draw.line(screen_ui, Endesga.debug_red, (vis_tl[0], vis_tl[1]), (vis_tl[0] - 30, vis_tl[1]), 3)
+        pygame.draw.line(screen_ui, Endesga.debug_red, (vis_bl[0], vis_bl[1]), (vis_bl[0] - 30, vis_bl[1]), 3)
+        pygame.draw.line(screen_ui, Endesga.debug_red, (vis_tl[0] - 20, vis_tl[1]), (vis_tl[0] - 20, vis_bl[1]), 3)
+        drawText(screen_ui, Endesga.debug_red, fonts["bold24"], vis_tl[0] - 35, (vis_tl[1] + vis_bl[1]) / 2 - 15, "hL",
+                 justify="right")
+
+        # Right visual edge
+        pygame.draw.line(screen_ui, Endesga.debug_red, (vis_tr[0], vis_tr[1]), (vis_tr[0] + 30, vis_tr[1]), 3)
+        pygame.draw.line(screen_ui, Endesga.debug_red, (vis_br[0], vis_br[1]), (vis_br[0] + 30, vis_br[1]), 3)
+        pygame.draw.line(screen_ui, Endesga.debug_red, (vis_tr[0] + 20, vis_tr[1]), (vis_tr[0] + 20, vis_br[1]), 3)
+        drawText(screen_ui, Endesga.debug_red, fonts["bold24"], vis_tr[0] + 35, (vis_tr[1] + vis_br[1]) / 2 - 15, "hR",
+                 justify="left")
 
     screen_ui.set_clip(None)
 
@@ -336,8 +354,8 @@ while running:
         drawText(screen_ui, tag_cols[2], fonts["bold30"], 490, math_y + 110, f"Δ2 = {d2:.1f} px")
 
         drawText(screen_ui, Endesga.greyL, fonts["bold30"], 50, math_y + 160, "Center Edges:")
-        drawText(screen_ui, Endesga.debug_red, fonts["bold30"], 270, math_y + 160, f"hL = {h_left:.1f} px")
-        drawText(screen_ui, Endesga.debug_red, fonts["bold30"], 490, math_y + 160, f"hR = {h_right:.1f} px")
+        drawText(screen_ui, Endesga.debug_red, fonts["bold30"], 270, math_y + 160, f"hL = {h_left_visual:.1f} px")
+        drawText(screen_ui, Endesga.debug_red, fonts["bold30"], 490, math_y + 160, f"hR = {h_right_visual:.1f} px")
 
         # =========================================================
         # CALCULATIONS
@@ -357,7 +375,8 @@ while running:
         B_est_3tag = math.degrees(math.asin(sin_B_3tag))
 
         drawText(screen_ui, Endesga.white, fonts["bold26"], col1_x, calc_y + 150,
-                 f"sin(B) ≈ ( 2 · {z_C:.1f} / {wing_span:.1f} ) · {ratio_term_3tag:.3f}", wrap=True, maxLen=580)
+                 f"sin(B) ≈ ( 2 · {z_C:.1f} / {wing_span:.1f} ) · {ratio_term_3tag:.3f} = {sin_B_3tag:.3f}", wrap=True,
+                 maxLen=580)
         drawText(screen_ui, tag_cols[1], fonts["bold30"], col1_x, calc_y + 190, f"B ≈ {B_est_3tag:.1f}°", wrap=True,
                  maxLen=580)
 
@@ -367,23 +386,24 @@ while running:
         drawText(screen_ui, Endesga.very_light_blue, fonts["bold24"], col2_x, calc_y + 100,
                  "sin(B) ≈ ( 2 · ZC / w ) · ( hL - hR ) / ( hL + hR )", wrap=True, maxLen=580)
 
-        ratio_term_1tag = (h_left - h_right) / (h_left + h_right + 1e-6)
+        ratio_term_1tag = (h_left_visual - h_right_visual) / (h_left_visual + h_right_visual + 1e-6)
         sin_B_1tag = (2 * z_C / tag_size) * ratio_term_1tag
         sin_B_1tag = max(-1.0, min(1.0, sin_B_1tag))
         B_est_1tag = math.degrees(math.asin(sin_B_1tag))
 
         drawText(screen_ui, Endesga.white, fonts["bold26"], col2_x, calc_y + 150,
-                 f"sin(B) ≈ ( 2 · {z_C:.1f} / {tag_size:.1f} ) · {ratio_term_1tag:.3f}", wrap=True, maxLen=580)
+                 f"sin(B) ≈ ( 2 · {z_C:.1f} / {tag_size:.1f} ) · {ratio_term_1tag:.3f} = {sin_B_1tag:.3f}", wrap=True,
+                 maxLen=580)
         drawText(screen_ui, tag_cols[1], fonts["bold30"], col2_x, calc_y + 190, f"B ≈ {B_est_1tag:.1f}°", wrap=True,
                  maxLen=580)
 
-        # Global Result
-        global_angle = (math.degrees(cam_ray_angle) + B_est_3tag) % 360
+        # Global Result - Fixed to use the camera optical axis minus estimated B
+        global_angle = (math.degrees(cam_look_angle) - B_est_3tag) % 360
         res_y = calc_y + 260
         pygame.draw.line(screen_ui, Endesga.greyVD, (50, res_y), (left_panel_w - 50, res_y), 4)
         drawText(screen_ui, Endesga.white, fonts["bold30"], 50, res_y + 30, "FINAL GLOBAL NORMAL RECOVERY:")
         drawText(screen_ui, Endesga.greyL, fonts["bold30"], 50, res_y + 80,
-                 f"Global Normal = Camera Ray ({math.degrees(cam_ray_angle):.1f}°) + B ({B_est_3tag:.1f}°) = {global_angle:.1f}°",
+                 f"Global Normal = Camera Optical Axis ({math.degrees(cam_look_angle):.1f}°) - B ({B_est_3tag:.1f}°) = {global_angle:.1f}°",
                  wrap=True, maxLen=left_panel_w - 100)
 
     # Controls
