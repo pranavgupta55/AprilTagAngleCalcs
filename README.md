@@ -1,5 +1,4 @@
 # AprilTagAngleCalcs
-Angles are confusing
 
 Because cameras project a 3D world onto a 2D sensor, depth ($Z$) is inherently lost. However, by measuring **perspective distortion**, we can recover the exact angle of an object.
 
